@@ -1,0 +1,22 @@
+
+============================================
+ERRO: 2026-01-15T13:35:22.268Z
+Contexto: createConnection - conn_1768484121941_1
+============================================
+Mensagem: logger.child is not a function
+Stack: TypeError: logger.child is not a function
+    at makeNoiseHandler (file:///C:/Users/NICK/whatsapp-bot/node_modules/@whiskeysockets/baileys/lib/Utils/noise-handler.js:12:21)
+    at makeSocket (file:///C:/Users/NICK/whatsapp-bot/node_modules/@whiskeysockets/baileys/lib/Socket/socket.js:35:19)
+    at makeUSyncSocket (file:///C:/Users/NICK/whatsapp-bot/node_modules/@whiskeysockets/baileys/lib/Socket/usync.js:6:18)
+    at makeChatsSocket (file:///C:/Users/NICK/whatsapp-bot/node_modules/@whiskeysockets/baileys/lib/Socket/chats.js:16:18)
+    at makeGroupsSocket (file:///C:/Users/NICK/whatsapp-bot/node_modules/@whiskeysockets/baileys/lib/Socket/groups.js:7:18)
+    at makeMessagesSocket (file:///C:/Users/NICK/whatsapp-bot/node_modules/@whiskeysockets/baileys/lib/Socket/messages-send.js:13:39)
+    at makeMessagesRecvSocket (file:///C:/Users/NICK/whatsapp-bot/node_modules/@whiskeysockets/baileys/lib/Socket/messages-recv.js:15:18)
+    at makeBusinessSocket (file:///C:/Users/NICK/whatsapp-bot/node_modules/@whiskeysockets/baileys/lib/Socket/business.js:6:18)
+    at makeCommunitiesSocket (file:///C:/Users/NICK/whatsapp-bot/node_modules/@whiskeysockets/baileys/lib/Socket/communities.js:8:18)
+    at makeWASocket (file:///C:/Users/NICK/whatsapp-bot/node_modules/@whiskeysockets/baileys/lib/Socket/index.js:14:12)
+
+Variáveis:
+{}
+============================================
+        

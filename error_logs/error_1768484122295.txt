@@ -1,0 +1,15 @@
+
+============================================
+ERRO: 2026-01-15T13:35:22.295Z
+Contexto: POST /api/connect - connectionId: null
+============================================
+Mensagem: Falha ao criar conexão: logger.child is not a function
+Stack: Error: Falha ao criar conexão: logger.child is not a function
+    at WhatsAppManager.createConnection (C:\Users\NICK\whatsapp-bot\server.js:260:19)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async C:\Users\NICK\whatsapp-bot\server.js:585:28
+
+Variáveis:
+{}
+============================================
+        
