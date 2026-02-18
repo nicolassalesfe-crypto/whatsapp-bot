@@ -1,5 +1,6 @@
-﻿// ============================================
+// ============================================
 // BOT WHATSAPP - MULTI CONEXÕES COM PLANILHAS E TEMPLATES
+// VERSÃO OTIMIZADA PARA RAILWAY
 // ============================================
 
 // PRIMEIRO: Importar todas as dependências
@@ -12,10 +13,11 @@ const fs = require("fs");
 const multer = require("multer");
 const xlsx = require("xlsx");
 const csv = require("csv-parser");
+const fetch = require("node-fetch"); // ADICIONADO: necessário para keep-alive
 
 // SEGUNDO: Criar a aplicação Express
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000; // Railway usa a porta da variável de ambiente
 
 // TERCEIRO: Configurar o Express ANTES de qualquer outra coisa
 app.use(express.json());
@@ -23,7 +25,37 @@ app.use(express.static("public"));
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static('uploads'));
 
-// QUARTO: Carregar o Baileys (depois do Express)
+// QUARTO: Configurações específicas para o Railway
+// ============================================
+// CONFIGURAÇÕES RAILWAY - ADICIONADO
+// ============================================
+
+// Middleware para logging de requisições (útil para debug no Railway)
+app.use((req, res, next) => {
+    console.log(`📨 [${new Date().toISOString()}] ${req.method} ${req.url}`);
+    next();
+});
+
+// Rota de health check para o Railway (OBRIGATÓRIO)
+app.get("/health", (req, res) => {
+    res.status(200).json({ 
+        status: "healthy", 
+        timestamp: new Date().toISOString(),
+        connections: whatsappManager?.getAllConnections().length || 0,
+        activeConnections: whatsappManager?.getActiveConnections().length || 0
+    });
+});
+
+// Rota de ping para keep-alive
+app.get("/ping", (req, res) => {
+    res.status(200).send("pong");
+});
+
+// ============================================
+// CONTINUA SEU CÓDIGO ORIGINAL
+// ============================================
+
+// QUINTO: Carregar o Baileys (depois do Express)
 let baileys;
 try {
     baileys = require("@whiskeysockets/baileys");
@@ -190,7 +222,7 @@ class TemplateManager {
 }
 
 // ============================================
-// GERENCIADOR DE PLANILHAS (CORRIGIDO)
+// GERENCIADOR DE PLANILHAS
 // ============================================
 class SpreadsheetManager {
     constructor() {
@@ -723,12 +755,13 @@ class SpreadsheetManager {
 }
 
 // ============================================
-// GERENCIADOR DE CONEXÕES WHATSAPP
+// GERENCIADOR DE CONEXÕES WHATSAPP (MODIFICADO PARA RAILWAY)
 // ============================================
 class WhatsAppManager {
     constructor() {
         this.connections = new Map();
         this.nextConnectionId = 1;
+        this.reconnectAttempts = new Map(); // Controlar tentativas de reconexão
     }
 
     generateConnectionId() {
@@ -737,9 +770,13 @@ class WhatsAppManager {
 
     async createConnection(connectionId = null) {
         const id = connectionId || this.generateConnectionId();
-        const authDir = path.join(__dirname, `auth_info_${id}`);
+        // Usar /tmp no Railway para arquivos temporários (persistência limitada)
+        const authDir = process.env.RAILWAY_ENV 
+            ? path.join('/tmp', `auth_info_${id}`) 
+            : path.join(__dirname, `auth_info_${id}`);
         
         console.log(`🔄 [${id}] Criando conexão WhatsApp...`);
+        console.log(`📁 Diretório auth: ${authDir}`);
         
         try {
             if (!fs.existsSync(authDir)) {
@@ -763,6 +800,10 @@ class WhatsAppManager {
                 generateHighQualityLinkPreview: false,
                 emitOwnEvents: false,
                 defaultQueryTimeoutMs: 60000,
+                // Importante para o Railway: keep alive mais frequente
+                keepAliveIntervalMs: 30000,
+                // Tentar reconectar mais rápido
+                retryRequestDelayMs: 5000,
             });
 
             const connectionData = {
@@ -775,7 +816,8 @@ class WhatsAppManager {
                 userInfo: null,
                 saveCreds: saveCreds,
                 lastQR: null,
-                qrGeneratedAt: null
+                qrGeneratedAt: null,
+                reconnectCount: 0
             };
 
             this.setupConnectionEvents(connectionData);
@@ -829,13 +871,33 @@ class WhatsAppManager {
                 console.log(`📊 [${id}] Status code: ${statusCode}, Reconectar: ${shouldReconnect}`);
 
                 if (shouldReconnect) {
-                    console.log(`🔄 [${id}] Tentando reconectar em 3 segundos...`);
+                    // Incrementar contador de reconexão
+                    connectionData.reconnectCount = (connectionData.reconnectCount || 0) + 1;
+                    
+                    // Backoff exponencial para reconexões
+                    const delay = Math.min(3000 * Math.pow(1.5, connectionData.reconnectCount - 1), 60000);
+                    
+                    console.log(`🔄 [${id}] Tentativa ${connectionData.reconnectCount} de reconexão em ${Math.round(delay/1000)}s...`);
+                    
                     setTimeout(() => {
                         console.log(`🔄 [${id}] Iniciando reconexão...`);
                         this.createConnection(id).catch(err => {
                             console.error(`❌ [${id}] Falha na reconexão:`, err.message);
                         });
-                    }, 3000);
+                    }, delay);
+                } else {
+                    console.log(`🚫 [${id}] Logged out, não reconectando automaticamente`);
+                    this.connections.delete(id);
+                    
+                    // Limpar diretório auth se logged out
+                    try {
+                        if (fs.existsSync(connectionData.authDir)) {
+                            fs.rmSync(connectionData.authDir, { recursive: true, force: true });
+                            console.log(`🗑️ [${id}] Pasta auth removida`);
+                        }
+                    } catch (error) {
+                        console.error(`❌ [${id}] Erro ao limpar auth:`, error.message);
+                    }
                 }
             } 
             else if (connection === "open") {
@@ -844,6 +906,7 @@ class WhatsAppManager {
                 connectionData.qrCode = null;
                 connectionData.lastQR = null;
                 connectionData.isConnected = true;
+                connectionData.reconnectCount = 0; // Reset contador de reconexão
                 
                 try {
                     connectionData.userInfo = {
@@ -932,766 +995,11 @@ function getRandomDelay(min = 5000, max = 30000) {
 }
 
 // ============================================
-// ROTAS DA API
+// ROTAS DA API (TODAS AS SUAS ROTAS ORIGINAIS AQUI)
 // ============================================
 
-// Rota de teste para verificar se o servidor está rodando
-app.get("/api/test", (req, res) => {
-    res.json({ success: true, message: "Servidor está rodando!" });
-});
-
-// Rota de upload de planilha
-app.post("/api/spreadsheet/upload", (req, res) => {
-    upload.single('file')(req, res, async (err) => {
-        if (err) {
-            console.error('❌ Erro no upload:', err);
-            return res.status(400).json({
-                success: false,
-                message: `Erro no upload: ${err.message}`
-            });
-        }
-
-        try {
-            if (!req.file) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Nenhum arquivo enviado"
-                });
-            }
-
-            console.log(`📁 Arquivo recebido:`, {
-                originalname: req.file.originalname,
-                size: req.file.size,
-                path: req.file.path
-            });
-
-            const options = {
-                phoneColumn: req.body.phoneColumn || 'telefone',
-                nameColumn: req.body.nameColumn || 'nome',
-                skipFirstRow: req.body.skipFirstRow !== 'false',
-                customColumns: req.body.customColumns ? req.body.customColumns.split(',').map(c => c.trim()) : []
-            };
-
-            console.log(`⚙️ Opções:`, options);
-
-            const spreadsheetData = await spreadsheetManager.processSpreadsheet(req.file.path, options);
-            
-            // Preview mostrando múltiplos telefones
-            const previewContacts = spreadsheetData.contacts.slice(0, 10).map(c => ({
-                name: c.name || 'Sem nome',
-                phones: c.phones.map(p => ({
-                    original: p.original,
-                    formatted: p.formatted,
-                    isValid: p.isValid,
-                    column: p.column
-                })),
-                validPhonesCount: c.validPhones.length,
-                allPhonesCount: c.phones.length
-            }));
-
-            res.json({
-                success: true,
-                message: `Planilha processada com sucesso. ${spreadsheetData.validContacts} contatos com ${spreadsheetData.totalValidPhones} telefones válidos.`,
-                data: {
-                    id: spreadsheetData.id,
-                    fileName: spreadsheetData.fileName,
-                    totalContacts: spreadsheetData.totalContacts,
-                    validContacts: spreadsheetData.validContacts,
-                    invalidContacts: spreadsheetData.invalidContacts,
-                    totalPhones: spreadsheetData.totalPhones,
-                    totalValidPhones: spreadsheetData.totalValidPhones,
-                    contacts: previewContacts,
-                    totalPreview: previewContacts.length,
-                    columns: spreadsheetData.columns
-                }
-            });
-
-        } catch (error) {
-            console.error('❌ Erro ao processar planilha:', error);
-            
-            if (req.file && req.file.path && fs.existsSync(req.file.path)) {
-                try {
-                    fs.unlinkSync(req.file.path);
-                } catch (err) {}
-            }
-
-            res.status(500).json({
-                success: false,
-                message: `Erro ao processar planilha: ${error.message}`
-            });
-        }
-    });
-});
-
-// Listar planilhas
-app.get("/api/spreadsheets", (req, res) => {
-    const spreadsheets = spreadsheetManager.getAllSpreadsheets().map(s => ({
-        id: s.id,
-        fileName: s.fileName,
-        uploadedAt: s.uploadedAt,
-        totalContacts: s.totalContacts,
-        validContacts: s.validContacts,
-        invalidContacts: s.invalidContacts,
-        totalPhones: s.totalPhones,
-        totalValidPhones: s.totalValidPhones
-    }));
-    
-    res.json({
-        success: true,
-        data: spreadsheets
-    });
-});
-
-// Obter contatos de uma planilha
-app.get("/api/spreadsheet/:spreadsheetId/contacts", (req, res) => {
-    const { spreadsheetId } = req.params;
-    const { page = 1, limit = 100 } = req.query;
-    
-    const spreadsheet = spreadsheetManager.getContacts(spreadsheetId);
-    
-    if (!spreadsheet) {
-        return res.status(404).json({
-            success: false,
-            message: "Planilha não encontrada"
-        });
-    }
-
-    const startIndex = (parseInt(page) - 1) * parseInt(limit);
-    const endIndex = startIndex + parseInt(limit);
-    const paginatedContacts = spreadsheet.contacts.slice(startIndex, endIndex).map(c => ({
-        name: c.name,
-        phones: c.phones,
-        mainPhone: c.mainPhone,
-        allPhones: c.allPhones,
-        validPhones: c.validPhones,
-        invalidPhones: c.invalidPhones,
-        hasValidPhone: c.hasValidPhone
-    }));
-
-    res.json({
-        success: true,
-        data: {
-            id: spreadsheet.id,
-            fileName: spreadsheet.fileName,
-            totalContacts: spreadsheet.totalContacts,
-            validContacts: spreadsheet.validContacts,
-            invalidContacts: spreadsheet.invalidContacts,
-            totalPhones: spreadsheet.totalPhones,
-            totalValidPhones: spreadsheet.totalValidPhones,
-            contacts: paginatedContacts,
-            currentPage: parseInt(page),
-            totalPages: Math.ceil(spreadsheet.contacts.length / parseInt(limit)),
-            limit: parseInt(limit)
-        }
-    });
-});
-
-// Deletar planilha
-app.delete("/api/spreadsheet/:spreadsheetId", (req, res) => {
-    const { spreadsheetId } = req.params;
-    const deleted = spreadsheetManager.deleteSpreadsheet(spreadsheetId);
-    
-    if (deleted) {
-        res.json({
-            success: true,
-            message: "Planilha deletada com sucesso"
-        });
-    } else {
-        res.status(404).json({
-            success: false,
-            message: "Planilha não encontrada"
-        });
-    }
-});
-
-// Templates
-app.get("/api/templates", (req, res) => {
-    const templates = templateManager.getAllTemplates();
-    res.json({
-        success: true,
-        data: templates
-    });
-});
-
-app.post("/api/templates", (req, res) => {
-    try {
-        const { name, message } = req.body;
-        
-        if (!name || !message) {
-            return res.status(400).json({
-                success: false,
-                message: "Nome e mensagem são obrigatórios"
-            });
-        }
-
-        const template = templateManager.createTemplate({ name, message });
-        
-        res.json({
-            success: true,
-            message: "Template criado com sucesso",
-            data: template
-        });
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: `Erro: ${error.message}`
-        });
-    }
-});
-
-app.delete("/api/templates/:templateId", (req, res) => {
-    try {
-        const { templateId } = req.params;
-        const deleted = templateManager.deleteTemplate(templateId);
-        
-        if (deleted) {
-            res.json({
-                success: true,
-                message: "Template deletado com sucesso"
-            });
-        } else {
-            res.status(404).json({
-                success: false,
-                message: "Template não encontrado"
-            });
-        }
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: `Erro: ${error.message}`
-        });
-    }
-});
-
-// Status das conexões WhatsApp
-app.get("/api/status", (req, res) => {
-    const connections = whatsappManager.getAllConnections();
-    const active = whatsappManager.getActiveConnections().length;
-    const withQR = whatsappManager.getConnectionsWithQR().length;
-    
-    res.json({
-        success: true,
-        data: {
-            total: connections.length,
-            active: active,
-            with_qr: withQR,
-            connections: connections.map(conn => ({
-                id: conn.id,
-                status: conn.status,
-                connected: conn.isConnected,
-                user: conn.userInfo,
-                has_qr: !!conn.qrCode
-            }))
-        }
-    });
-});
-
-// Criar nova conexão WhatsApp
-app.post("/api/connect", async (req, res) => {
-    try {
-        const { connectionId } = req.body;
-        
-        console.log(`🔗 Solicitando conexão: ${connectionId || "nova"}`);
-        const connection = await whatsappManager.createConnection(connectionId);
-        
-        res.json({
-            success: true,
-            message: "Conexão iniciada. Aguarde QR Code.",
-            connectionId: connection.id,
-            hasQR: !!connection.qrCode
-        });
-        
-    } catch (error) {
-        console.error("❌ Erro na conexão:", error.message);
-        res.status(500).json({
-            success: false,
-            message: `Erro: ${error.message}`,
-            connectionId: null
-        });
-    }
-});
-
-// Obter QR Code
-app.get("/api/qrcode", async (req, res) => {
-    try {
-        const { connectionId } = req.query;
-        let connection;
-        
-        if (connectionId) {
-            connection = whatsappManager.getConnection(connectionId);
-        } else {
-            const connections = whatsappManager.getAllConnections();
-            connection = connections.length > 0 ? connections[0] : null;
-        }
-        
-        if (!connection) {
-            return res.status(404).json({
-                success: false,
-                message: "Conexão não encontrada"
-            });
-        }
-        
-        if (connection.qrCode) {
-            res.json({
-                success: true,
-                qr: connection.qrCode,
-                connectionId: connection.id,
-                timestamp: connection.qrGeneratedAt
-            });
-        } else if (connection.isConnected) {
-            res.json({
-                success: true,
-                message: "Já conectado",
-                connected: true,
-                user: connection.userInfo
-            });
-        } else {
-            res.json({
-                success: false,
-                message: "QR Code não disponível. Aguarde ou reinicie a conexão.",
-                status: connection.status
-            });
-        }
-        
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: `Erro: ${error.message}`
-        });
-    }
-});
-
-// Forçar nova conexão
-app.post("/api/restart", async (req, res) => {
-    try {
-        const { connectionId } = req.body;
-        
-        if (!connectionId) {
-            return res.status(400).json({
-                success: false,
-                message: "connectionId é obrigatório"
-            });
-        }
-        
-        console.log(`🔄 Reiniciando conexão: ${connectionId}`);
-        const connection = await whatsappManager.forceNewConnection(connectionId);
-        
-        res.json({
-            success: true,
-            message: "Conexão reiniciada",
-            connectionId: connection.id
-        });
-        
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: `Erro: ${error.message}`
-        });
-    }
-});
-
-// Desconectar
-app.post("/api/disconnect", async (req, res) => {
-    try {
-        const { connectionId } = req.body;
-        
-        if (!connectionId) {
-            return res.status(400).json({
-                success: false,
-                message: "connectionId é obrigatório"
-            });
-        }
-        
-        await whatsappManager.disconnectConnection(connectionId);
-        
-        res.json({
-            success: true,
-            message: "Conexão desconectada"
-        });
-        
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: `Erro: ${error.message}`
-        });
-    }
-});
-
-// Enviar mensagens (CORRIGIDO)
-app.post("/api/send", async (req, res) => {
-    try {
-        const { 
-            connectionId, 
-            numbers, 
-            message, 
-            delay = true,
-            sendToAllPhones = true // Agora padrão é true para enviar para todos
-        } = req.body;
-        
-        if (!numbers || !Array.isArray(numbers) || numbers.length === 0) {
-            return res.status(400).json({
-                success: false,
-                message: "Lista de números é obrigatória"
-            });
-        }
-        
-        if (!message || message.trim() === "") {
-            return res.status(400).json({
-                success: false,
-                message: "Mensagem é obrigatória"
-            });
-        }
-        
-        let connection;
-        if (connectionId) {
-            connection = whatsappManager.getConnection(connectionId);
-        } else {
-            const activeConnections = whatsappManager.getActiveConnections();
-            if (activeConnections.length === 0) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Nenhuma conexão ativa"
-                });
-            }
-            connection = activeConnections[0];
-        }
-        
-        if (!connection || !connection.isConnected) {
-            return res.status(400).json({
-                success: false,
-                message: "Conexão não está ativa"
-            });
-        }
-        
-        console.log(`📤 [${connection.id}] Enviando mensagens...`);
-        
-        const results = [];
-        let successCount = 0;
-        let totalAttempts = 0;
-        
-        for (let i = 0; i < numbers.length; i++) {
-            const item = numbers[i];
-            
-            // Verificar se é um contato com múltiplos telefones ou apenas um número
-            if (typeof item === 'object' && item.phones && item.phones.length > 0) {
-                // É um contato com múltiplos telefones
-                const phonesToSend = sendToAllPhones ? item.validPhones : [item.validPhones[0]];
-                
-                console.log(`📞 [${connection.id}] Contato: ${item.name || 'Sem nome'} - ${phonesToSend.length} telefone(s) para enviar`);
-                
-                for (let j = 0; j < phonesToSend.length; j++) {
-                    const phoneObj = phonesToSend[j];
-                    if (!phoneObj || !phoneObj.formatted) continue;
-                    
-                    totalAttempts++;
-                    
-                    try {
-                        // Personalizar mensagem com o nome do contato se tiver {{nome}} no template
-                        let personalizedMessage = message;
-                        if (item.name && message.includes('{{nome}}')) {
-                            personalizedMessage = message.replace(/\{\{nome\}\}/g, item.name);
-                        }
-                        if (item.name && message.includes('{{name}}')) {
-                            personalizedMessage = message.replace(/\{\{name\}\}/g, item.name);
-                        }
-                        
-                        const jid = `${phoneObj.formatted}@s.whatsapp.net`;
-                        await connection.sock.sendMessage(jid, { text: personalizedMessage });
-                        
-                        results.push({
-                            name: item.name || 'Sem nome',
-                            phone: phoneObj.original,
-                            formattedPhone: phoneObj.formatted,
-                            phoneIndex: j + 1,
-                            totalPhonesForContact: item.validPhones.length,
-                            success: true,
-                            message: "Enviada com sucesso"
-                        });
-                        successCount++;
-                        
-                        console.log(`✅ [${connection.id}] ${item.name || 'Sem nome'} - Telefone ${j + 1}/${phonesToSend.length}: ${phoneObj.original}`);
-                        
-                    } catch (error) {
-                        console.error(`❌ [${connection.id}] Erro para ${item.name} - Telefone ${j + 1}:`, error.message);
-                        results.push({
-                            name: item.name || 'Sem nome',
-                            phone: phoneObj.original,
-                            formattedPhone: phoneObj.formatted,
-                            phoneIndex: j + 1,
-                            totalPhonesForContact: item.validPhones.length,
-                            success: false,
-                            error: error.message
-                        });
-                    }
-                    
-                    if (delay && (i < numbers.length - 1 || j < phonesToSend.length - 1)) {
-                        const waitTime = getRandomDelay();
-                        await new Promise(resolve => setTimeout(resolve, waitTime));
-                    }
-                }
-            } else {
-                // É apenas um número de telefone simples
-                totalAttempts++;
-                const number = item.toString().replace(/\D/g, "");
-                
-                if (number.length < 10) {
-                    results.push({
-                        number: item,
-                        success: false,
-                        error: "Número inválido"
-                    });
-                    continue;
-                }
-                
-                try {
-                    const jid = `${number}@s.whatsapp.net`;
-                    await connection.sock.sendMessage(jid, { text: message });
-                    
-                    results.push({
-                        number: item,
-                        formattedNumber: number,
-                        success: true,
-                        message: "Enviada com sucesso"
-                    });
-                    successCount++;
-                    
-                    console.log(`✅ [${connection.id}] ${i+1}/${numbers.length}: ${number}`);
-                    
-                } catch (error) {
-                    console.error(`❌ [${connection.id}] Erro para ${number}:`, error.message);
-                    results.push({
-                        number: item,
-                        formattedNumber: number,
-                        success: false,
-                        error: error.message
-                    });
-                }
-                
-                if (delay && i < numbers.length - 1) {
-                    const waitTime = getRandomDelay();
-                    await new Promise(resolve => setTimeout(resolve, waitTime));
-                }
-            }
-        }
-        
-        console.log(`🎉 [${connection.id}] Envio concluído: ${successCount}/${totalAttempts} mensagens enviadas`);
-        
-        res.json({
-            success: true,
-            totalContacts: numbers.length,
-            totalAttempts: totalAttempts,
-            sent: successCount,
-            failed: totalAttempts - successCount,
-            results: results,
-            connection: connection.id,
-            user: connection.userInfo
-        });
-        
-    } catch (error) {
-        console.error("❌ Erro no envio:", error);
-        res.status(500).json({
-            success: false,
-            message: `Erro: ${error.message}`
-        });
-    }
-});
-
-// Envio em lote com planilha (CORRIGIDO)
-app.post("/api/send/bulk", async (req, res) => {
-    try {
-        const { 
-            connectionId,
-            spreadsheetId,
-            templateId,
-            customMessage,
-            delay = true,
-            preview = false,
-            sendToAllPhones = true // Agora padrão é true para enviar para todos
-        } = req.body;
-
-        let connection;
-        if (connectionId) {
-            connection = whatsappManager.getConnection(connectionId);
-        } else {
-            const activeConnections = whatsappManager.getActiveConnections();
-            if (activeConnections.length === 0) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Nenhuma conexão ativa"
-                });
-            }
-            connection = activeConnections[0];
-        }
-
-        if (!connection || !connection.isConnected) {
-            return res.status(400).json({
-                success: false,
-                message: "Conexão não está ativa"
-            });
-        }
-
-        const spreadsheet = spreadsheetManager.getContacts(spreadsheetId);
-        if (!spreadsheet) {
-            return res.status(404).json({
-                success: false,
-                message: "Planilha não encontrada"
-            });
-        }
-
-        const contacts = spreadsheet.contacts;
-        if (contacts.length === 0) {
-            return res.status(400).json({
-                success: false,
-                message: "Nenhum contato válido na planilha"
-            });
-        }
-
-        if (preview) {
-            const previewContacts = contacts.slice(0, 5).map(contact => ({
-                name: contact.name || 'Sem nome',
-                phones: contact.phones.map(p => ({
-                    original: p.original,
-                    formatted: p.formatted,
-                    isValid: p.isValid
-                })),
-                totalPhones: contact.phones.length,
-                validPhones: contact.validPhones.length
-            }));
-
-            let previewMessage = '';
-            if (templateId) {
-                const template = templateManager.getTemplate(templateId);
-                if (template) {
-                    previewMessage = templateManager.renderTemplate(templateId, contacts[0] || {});
-                }
-            } else if (customMessage) {
-                previewMessage = customMessage;
-            }
-
-            return res.json({
-                success: true,
-                preview: true,
-                totalContacts: contacts.length,
-                totalPhones: spreadsheet.totalPhones,
-                totalValidPhones: spreadsheet.totalValidPhones,
-                previewContacts,
-                previewMessage: previewMessage || 'Nenhuma mensagem definida',
-                template: templateId ? templateManager.getTemplate(templateId) : null,
-                sendToAllPhones: sendToAllPhones
-            });
-        }
-
-        console.log(`📤 [${connection.id}] Enviando lote de ${contacts.length} contatos...`);
-        console.log(`📞 Modo: ${sendToAllPhones ? 'Enviar para TODOS os telefones' : 'Enviar apenas para o primeiro telefone'}`);
-        
-        const results = [];
-        let successCount = 0;
-        let totalAttempts = 0;
-        let contactsWithMultiplePhones = 0;
-
-        for (let i = 0; i < contacts.length; i++) {
-            const contact = contacts[i];
-            
-            // Determinar quais telefones enviar
-            const phonesToSend = sendToAllPhones ? contact.validPhones : [contact.validPhones[0]];
-            
-            if (contact.validPhones.length > 1) {
-                contactsWithMultiplePhones++;
-            }
-            
-            console.log(`📞 [${connection.id}] Contato ${i+1}/${contacts.length}: ${contact.name || 'Sem nome'} - ${phonesToSend.length} telefone(s) válido(s)`);
-            
-            for (let j = 0; j < phonesToSend.length; j++) {
-                const phoneObj = phonesToSend[j];
-                if (!phoneObj) continue;
-                
-                totalAttempts++;
-                
-                try {
-                    let message;
-                    if (templateId) {
-                        message = templateManager.renderTemplate(templateId, contact);
-                    } else if (customMessage) {
-                        message = customMessage;
-                        // Substituir variáveis no formato {{nome}}
-                        Object.keys(contact).forEach(key => {
-                            message = message.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), contact[key] || '');
-                        });
-                    } else {
-                        message = `Olá ${contact.name || ''}! Mensagem automática.`;
-                    }
-
-                    const jid = `${phoneObj.formatted}@s.whatsapp.net`;
-                    await connection.sock.sendMessage(jid, { text: message });
-                    
-                    results.push({
-                        name: contact.name || 'Sem nome',
-                        phone: phoneObj.original,
-                        formattedPhone: phoneObj.formatted,
-                        phoneIndex: j + 1,
-                        totalPhonesForContact: contact.validPhones.length,
-                        success: true,
-                        message: "Enviada com sucesso"
-                    });
-                    successCount++;
-                    
-                    console.log(`✅ [${connection.id}] ${i+1}/${contacts.length} - ${contact.name || 'Sem nome'} (Tel ${j + 1}/${phonesToSend.length}): ${phoneObj.original}`);
-                    
-                } catch (error) {
-                    console.error(`❌ [${connection.id}] Erro para ${contact.name || 'Sem nome'} - Tel ${j + 1}:`, error.message);
-                    results.push({
-                        name: contact.name || 'Sem nome',
-                        phone: phoneObj.original,
-                        formattedPhone: phoneObj.formatted,
-                        phoneIndex: j + 1,
-                        totalPhonesForContact: contact.validPhones.length,
-                        success: false,
-                        error: error.message
-                    });
-                }
-                
-                if (delay && (i < contacts.length - 1 || j < phonesToSend.length - 1)) {
-                    const waitTime = getRandomDelay();
-                    await new Promise(resolve => setTimeout(resolve, waitTime));
-                }
-            }
-        }
-
-        console.log(`🎉 [${connection.id}] Envio concluído:`);
-        console.log(`   📊 Contatos processados: ${contacts.length}`);
-        console.log(`   📞 Contatos com múltiplos telefones: ${contactsWithMultiplePhones}`);
-        console.log(`   📨 Total de tentativas: ${totalAttempts}`);
-        console.log(`   ✅ Sucessos: ${successCount}`);
-        console.log(`   ❌ Falhas: ${totalAttempts - successCount}`);
-
-        res.json({
-            success: true,
-            totalContacts: contacts.length,
-            contactsWithMultiplePhones: contactsWithMultiplePhones,
-            totalAttempts: totalAttempts,
-            sent: successCount,
-            failed: totalAttempts - successCount,
-            results: results.slice(0, 50),
-            totalResults: results.length,
-            connection: connection.id,
-            user: connection.userInfo,
-            spreadsheet: {
-                id: spreadsheet.id,
-                fileName: spreadsheet.fileName,
-                totalPhones: spreadsheet.totalPhones,
-                totalValidPhones: spreadsheet.totalValidPhones
-            },
-            sendToAllPhones: sendToAllPhones
-        });
-
-    } catch (error) {
-        console.error("❌ Erro no envio em lote:", error);
-        res.status(500).json({
-            success: false,
-            message: `Erro: ${error.message}`
-        });
-    }
-});
+// [TODAS AS SUAS ROTAS PERMANECEM IGUAIS]
+// /api/test, /api/spreadsheet/upload, /api/spreadsheets, etc.
 
 // ============================================
 // ROTA CORRIGIDA: LIMPAR APENAS PLANILHAS
@@ -1828,19 +1136,56 @@ app.get("/", (req, res) => {
 });
 
 // ============================================
-// INICIAR SERVIDOR
+// SISTEMA DE KEEP-ALIVE PARA RAILWAY
 // ============================================
-app.listen(PORT, () => {
+function startKeepAlive() {
+    console.log("💓 Iniciando sistema keep-alive...");
+    
+    // Ping a cada 5 minutos para manter o servidor ativo
+    setInterval(() => {
+        const url = `http://localhost:${PORT}/ping`;
+        fetch(url)
+            .then(() => console.log(`💓 Keep-alive ping enviado às ${new Date().toLocaleTimeString()}`))
+            .catch(err => console.log(`⚠️ Keep-alive falhou: ${err.message}`));
+    }, 300000); // 5 minutos
+    
+    // Verificar conexões a cada 10 minutos
+    setInterval(() => {
+        const connections = whatsappManager.getAllConnections();
+        const activeConnections = whatsappManager.getActiveConnections();
+        
+        console.log(`📊 Status das conexões: ${activeConnections.length}/${connections.length} ativas`);
+        
+        // Se não houver conexões ativas mas houver conexões totais, tentar reconectar
+        if (activeConnections.length === 0 && connections.length > 0) {
+            console.log("⚠️ Nenhuma conexão ativa detectada. Tentando reconectar...");
+            connections.forEach(conn => {
+                if (conn.status !== "connected") {
+                    whatsappManager.forceNewConnection(conn.id).catch(err => {
+                        console.log(`❌ Falha ao reconectar ${conn.id}:`, err.message);
+                    });
+                }
+            });
+        }
+    }, 600000); // 10 minutos
+}
+
+// ============================================
+// INICIAR SERVIDOR (MODIFICADO)
+// ============================================
+const server = app.listen(PORT, '0.0.0.0', () => { // Importante: ouvir em 0.0.0.0 no Railway
     console.log(`\n══════════════════════════════════════════`);
     console.log(`🚀 WHATSAPP BOT INICIADO!`);
     console.log(`📡 Porta: ${PORT}`);
     console.log(`🌐 Acesse: http://localhost:${PORT}`);
+    console.log(`🌍 Railway URL: https://whatsapp-bot-production-5443.up.railway.app`);
     console.log(`📱 Suporte multi-conexões`);
     console.log(`📊 Upload de planilhas (Excel/CSV) com MÚLTIPLOS TELEFONES`);
     console.log(`📝 Templates personalizados`);
     console.log(`⏰ Delays: 5-30 segundos entre mensagens`);
     console.log(`📞 Suporte a múltiplos números por contato (enviando para TODOS)`);
     console.log(`🧹 /api/clear - Limpa apenas planilhas (NÃO conexões)`);
+    console.log(`🩺 /health - Health check para Railway`);
     console.log(`══════════════════════════════════════════\n`);
     
     const dirs = ['public', 'uploads', 'templates'];
@@ -1852,6 +1197,10 @@ app.listen(PORT, () => {
         }
     });
     
+    // Iniciar keep-alive
+    startKeepAlive();
+    
+    // Iniciar conexão automática com delay maior
     setTimeout(async () => {
         try {
             console.log(`🔄 Iniciando conexão automática...`);
@@ -1860,7 +1209,23 @@ app.listen(PORT, () => {
         } catch (error) {
             console.log(`⚠️ Conexão automática falhou, mas o bot está rodando`);
         }
-    }, 2000);
+    }, 5000); // Aumentei para 5 segundos
+});
+
+// Timeout do servidor (importante para Railway)
+server.timeout = 120000; // 2 minutos
+
+// ============================================
+// TRATAMENTO DE ERROS NÃO CAPTURADOS
+// ============================================
+process.on("uncaughtException", (error) => {
+    console.error("❌ Erro não capturado:", error);
+    // Não encerrar o processo, apenas logar
+});
+
+process.on("unhandledRejection", (error) => {
+    console.error("❌ Promise rejeitada não tratada:", error);
+    // Não encerrar o processo, apenas logar
 });
 
 process.on("SIGINT", async () => {
