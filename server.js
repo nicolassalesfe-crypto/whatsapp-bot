@@ -3,7 +3,7 @@
 // VERSÃO OTIMIZADA PARA RAILWAY
 // ============================================
 
-// PRIMEIRO: Importar todas as dependências
+// PRIMEIRO: Importar todas as dependência
 const express = require("express");
 const { Boom } = require("@hapi/boom");
 const path = require("path");
