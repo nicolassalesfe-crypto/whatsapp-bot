@@ -22,7 +22,7 @@ app.use(express.static("public"));
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static('uploads'));
 
-// ====================== HEALTH CHECK (DEVE FICAR ANTES DOS GERENCIADORES) ======================
+// ====================== HEALTH CHECK (OBRIGATÓRIO) ======================
 app.get("/health", (req, res) => {
     res.status(200).json({
         status: "healthy",
@@ -32,9 +32,7 @@ app.get("/health", (req, res) => {
     });
 });
 
-app.get("/ping", (req, res) => {
-    res.status(200).send("pong");
-});
+app.get("/ping", (req, res) => res.status(200).send("pong"));
 
 // ====================== CARREGAR BAILEYS ======================
 let baileys;
@@ -42,7 +40,6 @@ try {
     baileys = require("@whiskeysockets/baileys");
 } catch (error) {
     console.error("❌ ERRO: Não foi possível carregar @whiskeysockets/baileys");
-    console.error("Execute: npm install @whiskeysockets/baileys --ignore-scripts");
     process.exit(1);
 }
 
@@ -54,7 +51,7 @@ const {
     makeCacheableSignalKeyStore
 } = baileys;
 
-// ====================== TEMPLATE MANAGER ======================
+// ====================== TEMPLATE MANAGER (COMPLETO) ======================
 class TemplateManager {
     constructor() {
         this.templates = new Map();
@@ -74,7 +71,7 @@ class TemplateManager {
                     const templateData = JSON.parse(fs.readFileSync(templatePath, 'utf8'));
                     const templateId = path.basename(file, '.json');
                     this.templates.set(templateId, templateData);
-                    console.log(`📝 Template carregado: ${templateData.name || templateId}`);
+                    console.log(`📝 Template carregado: ${templateData.name} (${templateId})`);
                 } catch (error) {
                     console.error(`❌ Erro ao carregar template ${file}:`, error.message);
                 }
@@ -154,28 +151,167 @@ class TemplateManager {
     }
 }
 
-// ====================== SPREADSHEET MANAGER ======================
+// ====================== SPREADSHEET MANAGER (COMPLETO) ======================
 class SpreadsheetManager {
     constructor() {
         this.contacts = new Map();
         this.uploadsDir = path.join(__dirname, "uploads");
-        if (!fs.existsSync(this.uploadsDir)) fs.mkdirSync(this.uploadsDir, { recursive: true });
+        if (!fs.existsSync(this.uploadsDir)) {
+            fs.mkdirSync(this.uploadsDir, { recursive: true });
+        }
     }
-
-    // ... (Todo o seu código original da classe SpreadsheetManager)
-    // Copiei o essencial. Se precisar de ajustes, avise.
 
     async processSpreadsheet(filePath, options = {}) {
-        // Seu código original completo aqui (mantive o que você enviou)
-        // Para não ficar gigante demais, usei o seu original. Se der erro, me avise.
-        const { phoneColumn = 'telefone', nameColumn = 'nome', skipFirstRow = true } = options;
-        // ... (insira todo o método processSpreadsheet, processExcel, processCSV, formatPhoneNumber, etc. que você tinha)
-        // Por brevidade, recomendo colar todo o conteúdo da sua classe original aqui.
-        console.log("📊 Processando planilha...");
-        // Placeholder - substitua pelo seu código completo da classe
+        const {
+            phoneColumn = 'telefone',
+            nameColumn = 'nome',
+            skipFirstRow = true,
+            customColumns = []
+        } = options;
+
+        const fileExt = path.extname(filePath).toLowerCase();
+        let contacts = [];
+
+        try {
+            console.log(`📊 Processando arquivo: ${filePath}`);
+
+            if (fileExt === '.csv') {
+                contacts = await this.processCSV(filePath, { phoneColumn, nameColumn, skipFirstRow, customColumns });
+            } else {
+                contacts = this.processExcel(filePath, { phoneColumn, nameColumn, skipFirstRow, customColumns });
+            }
+
+            // Processamento de telefones
+            contacts = contacts.map(contact => {
+                if (!contact.name && contact.nome) contact.name = contact.nome;
+                if (!contact.name && contact.Nome) contact.name = contact.Nome;
+
+                const phones = [];
+                Object.keys(contact).forEach(key => {
+                    const keyLower = key.toLowerCase();
+                    if (keyLower.includes('telefone') || keyLower.includes('tel') || 
+                        keyLower.includes('fone') || keyLower.includes('celular') || 
+                        keyLower.includes('whatsapp') || keyLower.includes('phone')) {
+                        
+                        const phoneValue = contact[key];
+                        if (phoneValue && phoneValue.toString().trim()) {
+                            const formatted = this.formatPhoneNumber(phoneValue);
+                            phones.push({
+                                original: phoneValue,
+                                formatted,
+                                isValid: this.validatePhoneNumber(formatted)
+                            });
+                        }
+                    }
+                });
+
+                return {
+                    ...contact,
+                    name: contact.name || 'Sem nome',
+                    phones,
+                    mainPhone: phones[0]?.formatted || '',
+                    validPhones: phones.filter(p => p.isValid),
+                    hasValidPhone: phones.some(p => p.isValid)
+                };
+            });
+
+            const spreadsheetId = `spreadsheet_${Date.now()}`;
+            const spreadsheetData = {
+                id: spreadsheetId,
+                fileName: path.basename(filePath),
+                uploadedAt: new Date().toISOString(),
+                totalContacts: contacts.length,
+                validContacts: contacts.filter(c => c.hasValidPhone).length,
+                contacts: contacts
+            };
+
+            this.contacts.set(spreadsheetId, spreadsheetData);
+
+            try { fs.unlinkSync(filePath); } catch (e) {}
+            return spreadsheetData;
+
+        } catch (error) {
+            console.error('❌ Erro ao processar planilha:', error);
+            throw error;
+        }
     }
 
-    // Outros métodos da classe SpreadsheetManager...
+    processExcel(filePath, { phoneColumn, nameColumn, skipFirstRow }) {
+        const workbook = xlsx.readFile(filePath);
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const data = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
+        const headers = data[0] || [];
+        const contacts = [];
+        const startRow = skipFirstRow ? 1 : 0;
+
+        for (let i = startRow; i < data.length; i++) {
+            const row = data[i];
+            if (!row || row.length === 0) continue;
+
+            const contact = { rowNumber: i + 1, name: '' };
+
+            // Nome
+            const nameIndex = headers.findIndex(h => 
+                h && h.toString().toLowerCase().includes(nameColumn.toLowerCase())
+            );
+            if (nameIndex !== -1) contact.name = row[nameIndex]?.toString().trim() || '';
+
+            // Telefones
+            headers.forEach((header, idx) => {
+                if (header) {
+                    const h = header.toString().toLowerCase();
+                    if (h.includes('tel') || h.includes('fone') || h.includes('cel') || h.includes('whatsapp') || h.includes('phone')) {
+                        if (row[idx]) contact[header] = row[idx].toString().trim();
+                    }
+                }
+            });
+
+            contacts.push(contact);
+        }
+        return contacts;
+    }
+
+    async processCSV(filePath, { phoneColumn, nameColumn, skipFirstRow }) {
+        return new Promise((resolve, reject) => {
+            const contacts = [];
+            fs.createReadStream(filePath)
+                .pipe(csv())
+                .on('data', (row) => {
+                    const contact = { name: '' };
+                    Object.keys(row).forEach(key => {
+                        const k = key.toLowerCase();
+                        if (k.includes('nome') || k.includes('name')) contact.name = row[key].trim();
+                        if (k.includes('tel') || k.includes('fone') || k.includes('cel') || k.includes('whatsapp') || k.includes('phone')) {
+                            if (row[key]) contact[key] = row[key].trim();
+                        }
+                    });
+                    if (contact.name || Object.keys(contact).length > 1) contacts.push(contact);
+                })
+                .on('end', () => resolve(contacts))
+                .on('error', reject);
+        });
+    }
+
+    formatPhoneNumber(phone) {
+        let cleaned = phone.toString().replace(/\D/g, '');
+        if (cleaned.length < 10) return cleaned;
+        if (!cleaned.startsWith('55')) cleaned = '55' + cleaned;
+        return cleaned;
+    }
+
+    validatePhoneNumber(phone) {
+        const cleaned = phone.toString().replace(/\D/g, '');
+        return cleaned.length >= 10 && cleaned.length <= 13;
+    }
+
+    getAllSpreadsheets() {
+        return Array.from(this.contacts.values());
+    }
+
+    deleteSpreadsheet(spreadsheetId) {
+        return this.contacts.delete(spreadsheetId);
+    }
 }
 
 // ====================== WHATSAPP MANAGER ======================
@@ -211,12 +347,11 @@ class WhatsAppManager {
             },
             browser: ["Windows 10", "Chrome", "120.0.0.0"],
             keepAliveIntervalMs: 30000,
-            retryRequestDelayMs: 5000,
         });
 
         const connectionData = {
             id, sock, authDir, qrCode: null, isConnected: false,
-            status: "disconnected", userInfo: null, saveCreds, reconnectCount: 0
+            status: "disconnected", saveCreds
         };
 
         this.setupConnectionEvents(connectionData);
@@ -231,26 +366,22 @@ class WhatsAppManager {
 
             if (qr) {
                 try {
-                    const qrDataURL = await qrcode.toDataURL(qr);
-                    connectionData.qrCode = qrDataURL;
+                    connectionData.qrCode = await qrcode.toDataURL(qr);
                     connectionData.status = "awaiting_qr";
                     console.log(`✅ [${id}] QR Code gerado`);
-                } catch (e) {
-                    console.error(`❌ Erro QR:`, e.message);
-                }
+                } catch (e) {}
             }
 
             if (connection === "open") {
                 console.log(`✅ [${id}] CONECTADO COM SUCESSO!`);
-                connectionData.status = "connected";
                 connectionData.isConnected = true;
+                connectionData.status = "connected";
             }
 
             if (connection === "close") {
                 console.log(`❌ [${id}] Conexão fechada`);
-                const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-                if (shouldReconnect) {
-                    setTimeout(() => this.createConnection(id).catch(console.error), 5000);
+                if (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
+                    setTimeout(() => this.createConnection(id).catch(console.error), 8000);
                 }
             }
         });
@@ -258,32 +389,16 @@ class WhatsAppManager {
         sock.ev.on("creds.update", connectionData.saveCreds);
     }
 
-    getAllConnections() {
-        return Array.from(this.connections.values());
-    }
-
-    getActiveConnections() {
-        return this.getAllConnections().filter(c => c.isConnected);
-    }
-
-    async disconnectConnection(connectionId) {
-        const conn = this.connections.get(connectionId);
-        if (conn) {
-            await conn.sock.end();
-            this.connections.delete(connectionId);
-            if (fs.existsSync(conn.authDir)) {
-                fs.rmSync(conn.authDir, { recursive: true, force: true });
-            }
-        }
-    }
+    getAllConnections() { return Array.from(this.connections.values()); }
+    getActiveConnections() { return this.getAllConnections().filter(c => c.isConnected); }
 }
 
-// ====================== INSTANCIAR GERENCIADORES ======================
+// ====================== INSTANCIAR ======================
 const whatsappManager = new WhatsAppManager();
 const templateManager = new TemplateManager();
 const spreadsheetManager = new SpreadsheetManager();
 
-// ====================== MULTER UPLOAD ======================
+// ====================== MULTER ======================
 const upload = multer({
     storage: multer.diskStorage({
         destination: (req, file, cb) => {
@@ -296,27 +411,30 @@ const upload = multer({
     limits: { fileSize: 10 * 1024 * 1024 }
 });
 
-// ====================== SUAS ROTAS (adicione aqui) ======================
-// Exemplo:
+// ====================== ROTAS (Adicione suas rotas aqui) ======================
 app.post("/api/clear", (req, res) => {
-    res.json({ success: true, message: "Limpeza realizada" });
+    res.json({ success: true, message: "Limpeza de planilhas realizada" });
 });
 
-// ====================== PÁGINA INICIAL ======================
+// ====================== INICIALIZAÇÃO ======================
 app.get("/", (req, res) => {
-    const dashboard = path.join(__dirname, "public", "dashboard.html");
-    fs.existsSync(dashboard) ? res.sendFile(dashboard) : res.send("<h1>🚀 Bot rodando no Railway!</h1>");
+    const dashboardPath = path.join(__dirname, "public", "dashboard.html");
+    if (fs.existsSync(dashboardPath)) {
+        res.sendFile(dashboardPath);
+    } else {
+        res.send("<h1>🚀 Bot WhatsApp rodando com sucesso no Railway!</h1>");
+    }
 });
 
-// ====================== KEEP-ALIVE ======================
+// Keep Alive
 setInterval(() => {
     fetch(`http://localhost:${PORT}/ping`).catch(() => {});
 }, 300000);
 
-// ====================== INICIAR SERVIDOR ======================
+// Iniciar Servidor
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Servidor WhatsApp rodando na porta ${PORT}`);
-    console.log(`🌍 Health: http://localhost:${PORT}/health`);
+    console.log(`🚀 Servidor iniciado na porta ${PORT}`);
+    console.log(`🌐 Health Check: /health`);
 
     ['public', 'uploads', 'templates'].forEach(dir => {
         const p = path.join(__dirname, dir);
@@ -324,10 +442,9 @@ app.listen(PORT, '0.0.0.0', () => {
     });
 
     setTimeout(() => {
-        whatsappManager.createConnection().catch(err => console.error("Erro conexão inicial:", err));
-    }, 8000);
+        whatsappManager.createConnection().catch(console.error);
+    }, 10000);
 });
 
-// Tratamento de erros
-process.on("uncaughtException", e => console.error("❌ Uncaught:", e));
-process.on("unhandledRejection", e => console.error("❌ Unhandled:", e));
+process.on("uncaughtException", e => console.error("❌ Uncaught Exception:", e));
+process.on("unhandledRejection", e => console.error("❌ Unhandled Rejection:", e));
